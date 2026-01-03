@@ -2477,12 +2477,13 @@ class AutoSplitterBot:
 
     def _register_handlers(self):
         """Register Pyrogram handlers"""
+        # Command handlers
         self.client.add_handler(
             filters.command("start") & filters.private, 
             self.handlers.start_command
         )
         
-        # Wrap the async function for addchannel
+        # Async wrapper for addchannel
         async def addchannel_wrapper(client, message):
             await handle_addchannel_command(client, message)
             
@@ -2493,18 +2494,20 @@ class AutoSplitterBot:
         
         self.client.add_handler(
             filters.command("settings") & filters.private,
-            lambda c, m: self.handlers.start_command(c, m) # Redirect to main menu
+            lambda c, m: self.handlers.start_command(c, m)
         )
         
+        # Message handlers
         self.client.add_handler(
             (filters.video | filters.document) & filters.private,
             self.handlers.video_handler
         )
         
-        self.client.add_handler(
-            filters.callback_query(),
-            self.handlers.callback_handler
-        )
+        # Callback Query Handler (FIXED)
+        # Instead of using filters.callback_query(), we use the decorator approach
+        @self.client.on_callback_query()
+        async def callback_wrapper(client, callback):
+            await self.handlers.callback_handler(client, callback)
 
     async def stop(self):
         await self.client.stop()
