@@ -1176,7 +1176,7 @@ class JobProcessor:
             await self._cleanup_job_completely(job_id)
     
     async def _process_from_start(self, job: JobData, status_msg: Message):
-        """Process job from beginning"""
+        """Process job from beginning (UPDATED LOGIC)"""
         job_id = job.job_id
         
         try:
@@ -1187,13 +1187,7 @@ class JobProcessor:
             
             # DOWNLOAD PHASE
             await db.update_job_state(job_id, JobState.DOWNLOADING)
-            await self._update_status_message(
-                status_msg,
-                f"📥 **Downloading**\n`{job.file_name}`\n\n"
-                f"Size: {TimeUtils.format_file_size(job.file_size)}\n\n"
-                f"Please wait...",
-                reply_markup=UIComponents.create_job_control_buttons(job_id, True)
-            )
+            # (UI update handled inside download function now)
             
             file_path = await self._download_file(job)
             if not file_path:
@@ -1209,7 +1203,7 @@ class JobProcessor:
             # PROBE PHASE
             await self._update_status_message(
                 status_msg,
-                "🔍 **Analyzing video**\n\nGetting duration and metadata...",
+                "🔍 **Analyzing video**\n\nGetting exact duration...",
                 reply_markup=UIComponents.create_job_control_buttons(job_id, True)
             )
             
@@ -1217,46 +1211,70 @@ class JobProcessor:
             if not video_info or video_info["duration"] <= 0:
                 raise Exception(f"Invalid video duration: {video_info.get('duration', 0)}")
             
-            duration = video_info["duration"]
-            total_parts = math.ceil(duration / job.clip_duration)
+            real_duration = video_info["duration"]
             
+            # --- FIX: UPDATE JOB TIME WITH REAL DURATION ---
+            # If end_time was 0 (unknown) or full video requested, update it
+            new_end_time = job.end_time
+            if job.end_time <= 0 or job.end_time > real_duration or (job.end_time == job.original_duration):
+                new_end_time = real_duration
+            
+            # Update DB with real info
+            await db.jobs.update_one(
+                {"job_id": job_id},
+                {
+                    "$set": {
+                        "original_duration": real_duration,
+                        "end_time": new_end_time,
+                        "file_path": file_path
+                    }
+                }
+            )
+            
+            # Refresh job object with new times
+            job.end_time = new_end_time
+            job.original_duration = real_duration
+            
+            # Calculate parts based on NEW duration
+            process_duration = job.end_time - job.start_time
+            total_parts = math.ceil(process_duration / job.clip_duration)
+            
+            if total_parts <= 0:
+                 raise Exception(f"Invalid Time Range: {job.start_time} to {job.end_time} (Duration: {process_duration})")
+
             await db.update_job_state(
-                job_id,
-                JobState.PROCESSING,
-                original_duration=duration,
-                total_parts=total_parts,
-                file_path=file_path
+                job_id, 
+                JobState.PROCESSING, 
+                total_parts=total_parts
             )
             
             # PROCESSING LOOP
-            await self._process_parts(job_id, status_msg, file_path, duration, total_parts)
+            await self._process_parts(job_id, status_msg, file_path, real_duration, total_parts)
             
             # COMPLETION
             await db.update_job_state(job_id, JobState.COMPLETED, completed_at=datetime.now())
             
-            completed_parts = len((await db.get_job(job_id)).completed_parts)
-            failed_parts = len((await db.get_job(job_id)).failed_parts)
+            final_job = await db.get_job(job_id)
+            completed_count = len(final_job.completed_parts)
+            failed_count = len(final_job.failed_parts)
             
             await self._update_status_message(
                 status_msg,
                 f"✅ **Job Completed!**\n\n"
                 f"✓ Total parts: {total_parts}\n"
-                f"✓ Completed: {completed_parts}\n"
-                f"{'⚠️ Failed: ' + str(failed_parts) if failed_parts > 0 else ''}\n"
-                f"✓ Channel: {job.target_channel_name}\n"
-                f"✓ Duration: {TimeUtils.format_duration(duration)}\n\n"
-                f"All files have been cleaned up and memory freed."
+                f"✓ Uploaded: {completed_count}\n"
+                f"✓ Failed: {failed_count}\n"
+                f"✓ Channel: {job.target_channel_name}\n\n"
+                f"All files have been cleaned up."
             )
             
             # Cleanup
             await self._cleanup_job_completely(job_id)
-            
-            # Update user stats
-            await self._update_user_stats(job.user_id, completed_parts, duration)
+            await self._update_user_stats(job.user_id, completed_count, real_duration)
             
         except asyncio.CancelledError:
             await db.update_job_state(job_id, JobState.CANCELLED, error_message="User cancelled")
-            await self._update_status_message(status_msg, "❌ **Job Cancelled**\n\nAll files cleaned up and memory freed.")
+            await self._update_status_message(status_msg, "❌ **Job Cancelled**\n\nAll files cleaned up.")
             await self._cleanup_job_completely(job_id)
             raise
             
@@ -1265,7 +1283,7 @@ class JobProcessor:
             await db.update_job_state(job_id, JobState.FAILED, error_message=str(e))
             await self._update_status_message(
                 status_msg,
-                f"❌ **Job Failed**\n\nError: `{str(e)[:200]}`\n\nAll files have been cleaned up."
+                f"❌ **Job Failed**\n\nError: `{str(e)[:200]}`"
             )
             await self._cleanup_job_completely(job_id)
     
@@ -1359,7 +1377,7 @@ class JobProcessor:
         if not job:
             return
         
-        # Calculate actual processing start time (default 0 or custom start)
+        # Calculate actual processing start time
         base_start_time = job.start_time
 
         for part_num in range(start_part, total_parts + 1):
@@ -1369,27 +1387,20 @@ class JobProcessor:
                 logger.info(f"Job {job_id} cancelled during processing at part {part_num}")
                 raise asyncio.CancelledError("Job cancelled by user")
             
-            # --- FIXED LOGIC FOR TIMESTAMPS ---
-            # Relative start time (0, 60, 120...)
+            # --- TIMESTAMP LOGIC ---
             relative_start = (part_num - 1) * job.clip_duration
-            
-            # Absolute start time (Base + Relative) -> For FFMPEG & Caption
             abs_start_time = base_start_time + relative_start
             
-            # Calculate segment duration
-            # We must not exceed the job.end_time
             time_remaining = job.end_time - abs_start_time
             segment_duration = min(job.clip_duration, time_remaining)
             
             abs_end_time = abs_start_time + segment_duration
             
-            if segment_duration <= 0.1: # Skip extremely small bits
+            if segment_duration <= 0.1:
                 continue
             
             # Update status
             progress_bar = UIComponents.create_progress_bar(part_num - 1, total_parts)
-            
-            # Sanitize filename for Markdown (Escape backticks)
             safe_filename = job.file_name.replace("`", "")
             
             await self._update_status_message(
@@ -1404,11 +1415,11 @@ class JobProcessor:
             
             output_path = Path(Config.TEMP_DIR) / f"{job_id}_part_{part_num}.mp4"
             
-            # Cut the segment (FFmpeg needs precise start time from source)
+            # Cut the segment
             success, error = await VideoProcessor.cut_video_segment(
                 input_path,
                 str(output_path),
-                abs_start_time,  # Use absolute start time from original video
+                abs_start_time,
                 segment_duration,
                 reencode=True
             )
@@ -1421,21 +1432,9 @@ class JobProcessor:
                 )
                 continue
             
-            # ... (Validation logic stays the same) ...
-            
             # Upload Phase
             await db.update_job_state(job_id, JobState.UPLOADING)
             
-            await self._update_status_message(
-                status_msg,
-                f"📤 **Uploading Part {part_num}/{total_parts}**\n\n"
-                f"⏱ Time: {TimeUtils.format_timestamp(abs_start_time)} - {TimeUtils.format_timestamp(abs_end_time)}\n"
-                f"📊 Progress: `{progress_bar}`\n"
-                f"📍 Status: Uploading to channel...",
-                reply_markup=UIComponents.create_job_control_buttons(job_id, True)
-            )
-            
-            # --- CAPTION WITH ORIGINAL TIMESTAMPS ---
             caption = job.caption_template.format(
                 part=part_num,
                 start_time=TimeUtils.format_timestamp(abs_start_time),
@@ -1444,11 +1443,13 @@ class JobProcessor:
                 file_name=safe_filename
             )
             
+            # --- PASS STATUS_MSG HERE ---
             upload_success = await self._upload_with_retry(
                 job,
                 str(output_path),
                 caption,
-                part_num
+                part_num,
+                status_msg
             )
             
             if upload_success:
@@ -1465,7 +1466,7 @@ class JobProcessor:
                     {"$push": {"failed_parts": part_num}}
                 )
             
-            # Cleanup clip immediately
+            # Cleanup clip
             if os.path.exists(output_path):
                 try:
                     os.remove(output_path)
@@ -1480,64 +1481,69 @@ class JobProcessor:
         job: JobData,
         file_path: str,
         caption: str,
-        part_num: int
+        part_num: int,
+        status_msg: Message = None
     ) -> bool:
-        """Upload with retry logic and flood control"""
+        """Upload with retry logic and PROGRESS BAR"""
         max_retries = Config.MAX_RETRIES
+        total_parts = job.total_parts
+        
+        # Set upload start time for speed calculation
+        setattr(self, f'_up_start_{job.job_id}', time.time())
         
         for attempt in range(max_retries):
             try:
-                # Check if job was cancelled
+                # Check cancellation
                 current_job = await db.get_job(job.job_id)
                 if current_job.cancel_requested:
-                    raise asyncio.CancelledError("Job cancelled during upload")
+                    raise asyncio.CancelledError("Job cancelled")
                 
+                # FloodWait Check
                 if job.target_channel_id in self.flood_wait_expiry:
                     expiry = self.flood_wait_expiry[job.target_channel_id]
                     if datetime.now() < expiry:
                         wait_seconds = (expiry - datetime.now()).total_seconds()
-                        logger.info(f"Flood wait active, waiting {wait_seconds}s")
+                        if status_msg:
+                            await self._update_status_message(status_msg, f"⏳ FloodWait: Sleeping {int(wait_seconds)}s...")
                         await asyncio.sleep(wait_seconds)
                 
+                # UPLOAD WITH PROGRESS
                 if job.upload_mode == UploadMode.VIDEO:
                     await self.bot.send_video(
                         chat_id=job.target_channel_id,
                         video=file_path,
                         caption=caption,
                         supports_streaming=True,
-                        parse_mode=enums.ParseMode.MARKDOWN
+                        parse_mode=enums.ParseMode.MARKDOWN,
+                        progress=self._upload_progress,
+                        progress_args=(job.job_id, part_num, total_parts)
+                    )
+                else:
+                    await self.bot.send_document(
+                        chat_id=job.target_channel_id,
+                        document=file_path,
+                        caption=caption,
+                        parse_mode=enums.ParseMode.MARKDOWN,
+                        progress=self._upload_progress,
+                        progress_args=(job.job_id, part_num, total_parts)
                     )
                 
-                logger.info(f"Uploaded part {part_num} to channel {job.target_channel_id}")
+                logger.info(f"Uploaded part {part_num}")
                 return True
                 
             except errors.FloodWait as e:
                 wait_time = e.value * Config.FLOOD_WAIT_BACKOFF
                 expiry_time = datetime.now() + timedelta(seconds=wait_time)
                 self.flood_wait_expiry[job.target_channel_id] = expiry_time
-                
-                logger.warning(f"FloodWait for {e.value}s, backing off to {wait_time}s")
                 await asyncio.sleep(wait_time)
-                
-                await db.update_job_state(
-                    job.job_id,
-                    JobState.PAUSED,
-                    flood_wait_until=expiry_time,
-                    error_message=f"FloodWait: {e.value}s"
-                )
-                
                 continue
                 
             except asyncio.CancelledError:
                 raise
                 
             except Exception as e:
-                logger.error(f"Upload attempt {attempt + 1} failed: {e}")
-                if attempt < max_retries - 1:
-                    await asyncio.sleep(2 ** attempt)
-                else:
-                    logger.error(f"Upload failed after {max_retries} attempts: {e}")
-                    return False
+                logger.error(f"Upload error: {e}")
+                await asyncio.sleep(5)
         
         return False
     
@@ -1593,8 +1599,83 @@ class JobProcessor:
             return None
     
     async def _download_progress(self, current, total, job_id):
-        """Download progress callback"""
-        pass
+        """Show download progress"""
+        now = time.time()
+        # Update only every 3 seconds to avoid FloodWait
+        if not hasattr(self, '_last_update'):
+            self._last_update = {}
+        
+        last_time = self._last_update.get(job_id, 0)
+        if now - last_time < 3 and current != total:
+            return
+            
+        self._last_update[job_id] = now
+        
+        try:
+            job = await db.get_job(job_id)
+            if not job or not job.progress_message_id:
+                return
+                
+            percentage = current * 100 / total
+            speed = current / (now - job.created_at.timestamp() + 1) # Simple speed calc
+            
+            progress_str = UIComponents.create_progress_bar(current, total)
+            text = (
+                f"📥 **Downloading...**\n"
+                f"`{job.file_name}`\n\n"
+                f"{progress_str}\n"
+                f"💾 {TimeUtils.format_file_size(current)} / {TimeUtils.format_file_size(total)}\n"
+                f"🚀 Speed: {TimeUtils.format_file_size(speed)}/s"
+            )
+            
+            await self.bot.edit_message_text(
+                chat_id=job.user_id,
+                message_id=job.progress_message_id,
+                text=text,
+                reply_markup=UIComponents.create_job_control_buttons(job_id, True)
+            )
+        except Exception:
+            pass
+    
+    async def _upload_progress(self, current, total, job_id, part_num, total_parts):
+        """Show upload progress for each part"""
+        now = time.time()
+        # Update only every 3 seconds to avoid FloodWait
+        if not hasattr(self, '_last_up_update'):
+            self._last_up_update = {}
+        
+        last_time = self._last_up_update.get(job_id, 0)
+        if now - last_time < 3 and current != total:
+            return
+            
+        self._last_up_update[job_id] = now
+        
+        try:
+            job = await db.get_job(job_id)
+            if not job or not job.progress_message_id:
+                return
+                
+            percentage = current * 100 / total
+            speed = current / (now - getattr(self, f'_up_start_{job_id}', now) + 1)
+            
+            progress_bar = UIComponents.create_progress_bar(current, total)
+            
+            text = (
+                f"📤 **Uploading Part {part_num}/{total_parts}**\n\n"
+                f"{progress_bar}\n"
+                f"📊 {percentage:.1f}%\n"
+                f"💾 {TimeUtils.format_file_size(current)} / {TimeUtils.format_file_size(total)}\n"
+                f"🚀 Speed: {TimeUtils.format_file_size(speed)}/s"
+            )
+            
+            await self.bot.edit_message_text(
+                chat_id=job.user_id,
+                message_id=job.progress_message_id,
+                text=text,
+                reply_markup=UIComponents.create_job_control_buttons(job_id, True)
+            )
+        except Exception:
+            pass
     
     async def _create_status_message(self, job: JobData) -> Message:
         """Create or get status message"""
