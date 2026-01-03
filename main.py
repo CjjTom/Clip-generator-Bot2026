@@ -16,6 +16,7 @@ from typing import Dict, List, Optional, Tuple, Union, Any
 from enum import Enum, auto
 from dataclasses import dataclass, field
 from contextlib import asynccontextmanager
+from pyrogram.handlers import MessageHandler, CallbackQueryHandler
 
 # Third-party libraries
 from pyrogram import Client, filters, enums, errors
@@ -2442,7 +2443,7 @@ class AutoSplitterBot:
         # Init DB Indexes
         await db.create_indexes()
         
-        # Start Web Server (Required for Render/Heroku)
+        # Start Web Server
         app = await web_server()
         runner = web.AppRunner(app)
         await runner.setup()
@@ -2472,106 +2473,80 @@ class AutoSplitterBot:
         except:
             pass
             
-        # NOTE: Removed 'await asyncio.Event().wait()' to prevent blocking here.
-        # We handle keep-alive in main()
+        # Idle
+        await asyncio.Event().wait()
 
     def _register_handlers(self):
-        """Register Pyrogram handlers"""
-        # Command handlers
+        """Register Pyrogram handlers using explicit Handler classes"""
+        
+        # 1. Start Command
         self.client.add_handler(
-            filters.command("start") & filters.private, 
-            self.handlers.start_command
+            MessageHandler(
+                self.handlers.start_command,
+                filters.command("start") & filters.private
+            )
         )
         
-        # Async wrapper for addchannel
+        # 2. Add Channel Command (with wrapper)
         async def addchannel_wrapper(client, message):
             await handle_addchannel_command(client, message)
             
         self.client.add_handler(
-            filters.command("addchannel") & filters.private,
-            addchannel_wrapper
+            MessageHandler(
+                addchannel_wrapper,
+                filters.command("addchannel") & filters.private
+            )
         )
         
+        # 3. Settings Command
         self.client.add_handler(
-            filters.command("settings") & filters.private,
-            lambda c, m: self.handlers.start_command(c, m)
+            MessageHandler(
+                lambda c, m: self.handlers.start_command(c, m),
+                filters.command("settings") & filters.private
+            )
         )
         
-        # Message handlers
+        # 4. Video/Document Handler
         self.client.add_handler(
-            (filters.video | filters.document) & filters.private,
-            self.handlers.video_handler
+            MessageHandler(
+                self.handlers.video_handler,
+                (filters.video | filters.document) & filters.private
+            )
         )
         
-        # Callback Query Handler (Using Decorator - The Fix)
-        @self.client.on_callback_query()
-        async def callback_wrapper(client, callback):
-            await self.handlers.callback_handler(client, callback)
+        # 5. Callback Query Handler
+        self.client.add_handler(
+            CallbackQueryHandler(
+                self.handlers.callback_handler
+            )
+        )
 
     async def stop(self):
         await self.client.stop()
-
 # ================================================================================
-# 11. ENTRY POINT (FIXED FOR FREE HOSTING)
+# 11. ENTRY POINT
 # ================================================================================
 
 async def main():
-    """Main function to start the bot and keep it running"""
     bot = AutoSplitterBot()
     
-    # Start everything (Web server + Bot + Processor)
-    await bot.start()
-    
-    # Keep the main loop running until a signal stops it
-    stop_event = asyncio.Event()
-    await stop_event.wait()
+    def signal_handler():
+        logger.info("Stopping bot...")
+        asyncio.create_task(bot.stop())
+        sys.exit(0)
+
+    try:
+        await bot.start()
+    except KeyboardInterrupt:
+        pass
+    except Exception as e:
+        logger.critical(f"Fatal error: {e}\n{traceback.format_exc()}")
 
 if __name__ == "__main__":
-    # Setup Event Loop
+    if sys.platform == "win32":
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+    
     try:
-        loop = asyncio.get_event_loop()
-    except RuntimeError:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-
-    # Graceful Shutdown Logic
-    async def shutdown_gracefully(sig):
-        logger.info(f"Received signal {sig.name}, shutting down...")
-        
-        # Cancel all running tasks
-        tasks = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
-        for t in tasks:
-            t.cancel()
-            
-        await asyncio.gather(*tasks, return_exceptions=True)
-        
-        if loop.is_running():
-            loop.stop()
-
-    # Register Signals (SIGINT, SIGTERM)
-    try:
-        for sig in (signal.SIGINT, signal.SIGTERM):
-            loop.add_signal_handler(
-                sig,
-                lambda s=sig: asyncio.create_task(shutdown_gracefully(s))
-            )
-    except NotImplementedError:
-        logger.warning("Signal handlers not supported on this platform. Ignoring.")
-
-    # Run the Loop
-    try:
-        logger.info("Starting event loop...")
-        loop.run_until_complete(main())
-    except asyncio.CancelledError:
-        logger.info("Main execution cancelled.")
+        asyncio.run(main())
     except KeyboardInterrupt:
-        logger.info("KeyboardInterrupt received.")
-    except Exception as e:
-        logger.critical(f"Critical error: {e}", exc_info=True)
-    finally:
-        logger.info("Closing loop...")
-        if loop.is_running():
-            loop.stop()
-        if not loop.is_closed():
-            loop.close()
-        logger.info("Goodbye.")
+        pass
