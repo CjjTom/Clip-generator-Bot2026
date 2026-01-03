@@ -1816,7 +1816,7 @@ class BotHandlers:
             reply_markup=UIComponents.create_duration_buttons(message.id)
         )
         
-      async def text_handler(self, client: Client, message: Message):
+    async def text_handler(self, client: Client, message: Message):
         """Handle text input for Custom Time range"""
         user_id = message.from_user.id
         state_data = self.user_states.get(user_id)
