@@ -923,7 +923,7 @@ class UIComponents:
         
         return f"{bar} {percentage}%"
         
-        @staticmethod
+    @staticmethod
     def create_trim_mode_buttons(message_id: int) -> InlineKeyboardMarkup:
         """Create buttons to choose between Full Video or Custom Trim"""
         buttons = [
