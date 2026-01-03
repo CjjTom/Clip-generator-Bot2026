@@ -1,0 +1,7 @@
+pyrofork
+tgcrypto
+motor
+dnspython
+aiohttp
+psutil
+ffmpeg-python
