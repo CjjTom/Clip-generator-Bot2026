@@ -1815,9 +1815,69 @@ class BotHandlers:
             f"🎬 **Video Received**\n`{file_name}`\n\n**Select clip duration:**",
             reply_markup=UIComponents.create_duration_buttons(message.id)
         )
+        
+      async def text_handler(self, client: Client, message: Message):
+        """Handle text input for Custom Time range"""
+        user_id = message.from_user.id
+        state_data = self.user_states.get(user_id)
+        
+        if not state_data or state_data.get("state") != "waiting_custom_time":
+            return
+            
+        text = message.text.strip()
+        
+        # Try to parse time format: "HH:MM:SS HH:MM:SS" or "MM:SS MM:SS"
+        try:
+            parts = text.split()
+            if len(parts) != 2:
+                await message.reply("❌ Invalid format. Please send: `Start End`\nExample: `00:15:00 01:50:00`")
+                return
+            
+            def parse_time(t_str):
+                # Helper to convert HH:MM:SS to seconds
+                t_parts = list(map(int, t_str.split(':')))
+                if len(t_parts) == 3:
+                    return t_parts[0]*3600 + t_parts[1]*60 + t_parts[2]
+                elif len(t_parts) == 2:
+                    return t_parts[0]*60 + t_parts[1]
+                else:
+                    raise ValueError
+            
+            start_seconds = parse_time(parts[0])
+            end_seconds = parse_time(parts[1])
+            
+            if start_seconds >= end_seconds:
+                await message.reply("❌ Start time must be less than End time.")
+                return
+                
+            # Check against original duration if known
+            if state_data.get("duration") and end_seconds > state_data["duration"]:
+                await message.reply(f"❌ End time exceeds video duration ({TimeUtils.format_timestamp(state_data['duration'])})")
+                return
+
+            # Update state with custom range
+            self.user_states[user_id]["custom_start"] = start_seconds
+            self.user_states[user_id]["custom_end"] = end_seconds
+            self.user_states[user_id]["state"] = "waiting_duration"
+            
+            # Calculate new duration to process
+            new_duration = end_seconds - start_seconds
+            
+            await message.reply(
+                f"✅ **Range Set:** {parts[0]} - {parts[1]}\n"
+                f"Total Clip Time: {TimeUtils.format_duration(new_duration)}\n\n"
+                f"**Now select split duration per part:**",
+                reply_markup=UIComponents.create_duration_buttons(state_data["file_message_id"])
+            )
+            
+        except ValueError:
+            await message.reply("❌ Invalid time format. Use HH:MM:SS (e.g., `00:15:00 01:30:00`)")
+        except Exception as e:
+            logger.error(f"Time parse error: {e}")
+            await message.reply("❌ Error parsing time.")
     
     async def callback_handler(self, client: Client, callback_query: CallbackQuery):
-        """Handle all callback queries (Merged Logic)"""
+        """Handle all callback queries"""
         data = callback_query.data
         user_id = callback_query.from_user.id
         
@@ -1828,32 +1888,8 @@ class BotHandlers:
                 return
         
         try:
-            # --- NEW: MODE SELECTION (Step 1) ---
-            if data.startswith("mode_full_"):
-                msg_id = int(data.split("_")[2])
-                if user_id in self.user_states:
-                    # Set full video range
-                    self.user_states[user_id]["custom_start"] = 0
-                    self.user_states[user_id]["custom_end"] = self.user_states[user_id]["duration"]
-                    self.user_states[user_id]["state"] = "waiting_duration"
-                    
-                    await callback_query.message.edit_text(
-                        "🎬 **Full Video Selected**\n\n**Select split duration:**",
-                        reply_markup=UIComponents.create_duration_buttons(msg_id)
-                    )
-            
-            elif data.startswith("mode_custom_"):
-                if user_id in self.user_states:
-                    self.user_states[user_id]["state"] = "waiting_custom_time"
-                    await callback_query.message.edit_text(
-                        "✂️ **Custom Trim Mode**\n\n"
-                        "Send me the **Start** and **End** time.\n"
-                        "Format: `HH:MM:SS HH:MM:SS`\n\n"
-                        "Example: `00:15:00 01:50:00`"
-                    )
-
-            # --- EXISTING MENU HANDLERS ---
-            elif data == "help_video":
+            # --- MENU HANDLERS ---
+            if data == "help_video":
                 await callback_query.message.edit_text(
                     "📤 **How to Send Video**\n\nSimply send any Video file here.",
                     reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="start")]])
@@ -1925,13 +1961,10 @@ class BotHandlers:
                 await self._show_channel_list(callback_query)
             
             elif data == "add_channel_prompt":
-                 # Updated instructions for Add Channel
-                 await callback_query.message.edit_text(
-                     "➕ **Add Channel**\n\nUse this command:\n`/addchannel CHANNEL_ID CHANNEL_NAME`\n\n"
-                     "Example:\n`/addchannel -1001234567890 MyMovieChannel`\n\n"
-                     "Note: Make sure to add me as Admin in that channel first!",
-                     reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="channel_list")]])
-                 )
+                await callback_query.message.edit_text(
+                    "➕ **Add Channel**\nUse: `/addchannel <id> <name>`",
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="channel_list")]])
+                )
             
             elif data.startswith("delete_channel_"):
                 channel_id = int(data.split("_")[2])
