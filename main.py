@@ -197,12 +197,18 @@ class StructuredLogger:
     def __init__(self):
         self.logger = logging.getLogger("AutoSplitter")
         
+        # --- FIX: Create logs directory immediately ---
+        Path(Config.LOG_DIR).mkdir(parents=True, exist_ok=True)
+        # ----------------------------------------------
+        
+        # Console handler
         console_handler = logging.StreamHandler()
         console_format = logging.Formatter(
             "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
         )
         console_handler.setFormatter(console_format)
         
+        # File handler
         log_file = Path(Config.LOG_DIR) / f"autosplitter_{datetime.now():%Y%m%d}.log"
         file_handler = logging.FileHandler(log_file)
         file_format = logging.Formatter(
@@ -214,6 +220,7 @@ class StructuredLogger:
         self.logger.addHandler(file_handler)
         self.logger.setLevel(getattr(logging, Config.LOG_LEVEL))
         
+        # Telegram log channel handler (if configured)
         self.log_channel = None
         self.bot_client = None
     
