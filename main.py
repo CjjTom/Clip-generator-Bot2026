@@ -202,9 +202,7 @@ class StructuredLogger:
     def __init__(self):
         self.logger = logging.getLogger("AutoSplitter")
         
-        # --- FIX: Create logs directory immediately ---
         Path(Config.LOG_DIR).mkdir(parents=True, exist_ok=True)
-        # ----------------------------------------------
         
         # Console handler
         console_handler = logging.StreamHandler()
@@ -406,6 +404,8 @@ class DatabaseManager:
             "file_name": job_data.file_name,
             "file_size": job_data.file_size,
             "original_duration": job_data.original_duration,
+            "start_time": job_data.start_time,
+            "end_time": job_data.end_time,
             "clip_duration": job_data.clip_duration,
             "total_parts": job_data.total_parts,
             "current_part": job_data.current_part,
@@ -470,6 +470,8 @@ class DatabaseManager:
             file_name=doc["file_name"],
             file_size=doc["file_size"],
             original_duration=doc.get("original_duration", 0.0),
+            start_time=doc.get("start_time", 0.0),
+            end_time=doc.get("end_time", 0.0),
             clip_duration=doc["clip_duration"],
             total_parts=doc["total_parts"],
             current_part=doc["current_part"],
@@ -922,7 +924,7 @@ class UIComponents:
         percentage = int(progress * 100)
         
         return f"{bar} {percentage}%"
-        
+    
     @staticmethod
     def create_trim_mode_buttons(message_id: int) -> InlineKeyboardMarkup:
         """Create buttons to choose between Full Video or Custom Trim"""
@@ -1212,12 +1214,14 @@ class JobProcessor:
                 raise Exception(f"Invalid video duration: {video_info.get('duration', 0)}")
             
             real_duration = video_info["duration"]
+            logger.info(f"Real duration detected: {real_duration}s (Initial was: {job.original_duration}s)")
             
             # --- FIX: UPDATE JOB TIME WITH REAL DURATION ---
             # If end_time was 0 (unknown) or full video requested, update it
             new_end_time = job.end_time
-            if job.end_time <= 0 or job.end_time > real_duration or (job.end_time == job.original_duration):
+            if job.end_time <= 0 or job.end_time > real_duration or (job.end_time == job.original_duration and job.original_duration == 0):
                 new_end_time = real_duration
+                logger.info(f"Correcting end_time to {new_end_time}s")
             
             # Update DB with real info
             await db.jobs.update_one(
@@ -1858,7 +1862,7 @@ class BotHandlers:
         await message.reply(text, reply_markup=InlineKeyboardMarkup(buttons))
     
     async def video_handler(self, client: Client, message: Message):
-        """Handle incoming video files"""
+        """Handle incoming video files - Ask for Mode first"""
         user_id = message.from_user.id
         
         if user_id != Config.OWNER_ID and user_id not in Config.ADMIN_IDS:
@@ -1869,34 +1873,35 @@ class BotHandlers:
             await message.reply("⚠️ You already have an active job. Please cancel it first.")
             return
         
+        # Get file info
         if message.video:
             file_name = message.video.file_name or f"video_{message.id}.mp4"
             file_size = message.video.file_size
             duration = message.video.duration
             file_id = message.video.file_id
-        elif message.document and "video" in (message.document.mime_type or ""):
+        elif message.document:
             file_name = message.document.file_name or f"video_{message.id}.mp4"
             file_size = message.document.file_size
-            duration = getattr(message.document, "duration", 0)
+            duration = getattr(message.document, "duration", 0) # Some documents have no duration metadata
             file_id = message.document.file_id
         else:
-            await message.reply("❌ Please send a video file.")
             return
         
+        # Save temporary state
         self.user_states[user_id] = {
             "file_message_id": message.id,
             "file_id": file_id,
             "file_name": file_name,
             "file_size": file_size,
             "duration": duration,
-            "state": "waiting_duration"
+            "state": "waiting_mode" # New state
         }
         
         await message.reply(
-            f"🎬 **Video Received**\n`{file_name}`\n\n**Select clip duration:**",
-            reply_markup=UIComponents.create_duration_buttons(message.id)
+            f"🎬 **Video Received**\n`{file_name}`\n\n**Select Processing Mode:**",
+            reply_markup=UIComponents.create_trim_mode_buttons(message.id)
         )
-        
+
     async def text_handler(self, client: Client, message: Message):
         """Handle text input for Custom Time range"""
         user_id = message.from_user.id
@@ -1956,9 +1961,9 @@ class BotHandlers:
         except Exception as e:
             logger.error(f"Time parse error: {e}")
             await message.reply("❌ Error parsing time.")
-    
+
     async def callback_handler(self, client: Client, callback_query: CallbackQuery):
-        """Handle all callback queries"""
+        """Handle all callback queries (Merged Logic)"""
         data = callback_query.data
         user_id = callback_query.from_user.id
         
@@ -1969,8 +1974,32 @@ class BotHandlers:
                 return
         
         try:
-            # --- MENU HANDLERS ---
-            if data == "help_video":
+            # --- NEW: MODE SELECTION (Step 1) ---
+            if data.startswith("mode_full_"):
+                msg_id = int(data.split("_")[2])
+                if user_id in self.user_states:
+                    # Set full video range
+                    self.user_states[user_id]["custom_start"] = 0
+                    self.user_states[user_id]["custom_end"] = self.user_states[user_id]["duration"]
+                    self.user_states[user_id]["state"] = "waiting_duration"
+                    
+                    await callback_query.message.edit_text(
+                        "🎬 **Full Video Selected**\n\n**Select split duration:**",
+                        reply_markup=UIComponents.create_duration_buttons(msg_id)
+                    )
+            
+            elif data.startswith("mode_custom_"):
+                if user_id in self.user_states:
+                    self.user_states[user_id]["state"] = "waiting_custom_time"
+                    await callback_query.message.edit_text(
+                        "✂️ **Custom Trim Mode**\n\n"
+                        "Send me the **Start** and **End** time.\n"
+                        "Format: `HH:MM:SS HH:MM:SS`\n\n"
+                        "Example: `00:15:00 01:50:00`"
+                    )
+
+            # --- EXISTING MENU HANDLERS ---
+            elif data == "help_video":
                 await callback_query.message.edit_text(
                     "📤 **How to Send Video**\n\nSimply send any Video file here.",
                     reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="start")]])
@@ -2042,10 +2071,13 @@ class BotHandlers:
                 await self._show_channel_list(callback_query)
             
             elif data == "add_channel_prompt":
-                await callback_query.message.edit_text(
-                    "➕ **Add Channel**\nUse: `/addchannel <id> <name>`",
-                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="channel_list")]])
-                )
+                 # Updated instructions for Add Channel
+                 await callback_query.message.edit_text(
+                     "➕ **Add Channel**\n\nUse this command:\n`/addchannel CHANNEL_ID CHANNEL_NAME`\n\n"
+                     "Example:\n`/addchannel -1001234567890 MyMovieChannel`\n\n"
+                     "Note: Make sure to add me as Admin in that channel first!",
+                     reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="channel_list")]])
+                 )
             
             elif data.startswith("delete_channel_"):
                 channel_id = int(data.split("_")[2])
