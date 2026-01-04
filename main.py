@@ -1800,7 +1800,12 @@ class BotHandlers:
     
     async def start_command(self, client: Client, message: Message):
         """Handle /start command"""
-        user_id = message.from_user.id
+        # Fix: Get ID reliably
+        user = message.from_user
+        if not user:
+            return # Ignore channel posts
+            
+        user_id = user.id
         
         logger.info(f"Start command from User: {user_id}")
         
@@ -1813,7 +1818,8 @@ class BotHandlers:
             )
             return
         
-        user = await db.get_or_create_user(user_id, message.from_user.first_name)
+        # Create user in DB
+        await db.get_or_create_user(user_id, user.first_name or "Unknown")
         
         incomplete_job = await db.get_active_user_job(user_id)
         if incomplete_job:
@@ -1866,6 +1872,7 @@ class BotHandlers:
     
     async def video_handler(self, client: Client, message: Message):
         """Handle incoming video files - Ask for Mode first"""
+        if not message.from_user: return
         user_id = message.from_user.id
         
         # Access Check
@@ -1908,6 +1915,7 @@ class BotHandlers:
 
     async def text_handler(self, client: Client, message: Message):
         """Handle text input for Custom Time range"""
+        if not message.from_user: return
         user_id = message.from_user.id
         
         if user_id not in Config.ADMIN_IDS:
@@ -2056,7 +2064,7 @@ class BotHandlers:
             elif data.startswith("admin_"):
                 # Strict check for Owner ID
                 if user_id != Config.OWNER_ID:
-                    await callback_query.answer("🔒 Admin Panel is restricted to Owner only.", show_alert=True)
+                    await callback_query.answer("🔒 Restricted to Owner.", show_alert=True)
                     return
 
                 if data == "admin_panel":
@@ -2128,12 +2136,13 @@ class BotHandlers:
                 
         except Exception as e:
             logger.error(f"Callback error: {e}")
-            await callback_query.answer("❌ Error occurred", show_alert=True)
+            # Prevent popup error if something goes wrong
+            try:
+                await callback_query.answer("⚠️ Processing...", show_alert=False)
+            except:
+                pass
 
     # --- HELPER METHODS ---
-    
-    # ... (Keep existing helpers: _handle_duration_selection, etc.) ...
-    # IMPORTANT: Ensure _show_admin_panel handles non-owners gracefully now
     
     async def _handle_duration_selection(self, callback: CallbackQuery, msg_id: int, duration: int):
         user_id = callback.from_user.id
