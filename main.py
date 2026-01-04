@@ -138,38 +138,38 @@ class Config:
     BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
     
     # Database
-    DATABASE_URL = os.environ.get("DATABASE_URL", "mongodb://localhost:27017")
-    DATABASE_NAME = os.environ.get("DATABASE_NAME", "AutoSplitterBot")
+    DATABASE_URL = os.environ.get("DATABASE_URL", "")
+    DATABASE_NAME = os.environ.get("DATABASE_NAME", "AutoVideoClipGenerate")
     
     # Security
     OWNER_ID = int(os.environ.get("OWNER_ID", 0))
-    ADMIN_IDS = [int(x) for x in os.environ.get("ADMIN_IDS", "").split("7577977996") if x] + [OWNER_ID]
+    
+    # --- FIXED ADMIN ID LOADING ---
+    # Split by comma, strip spaces, and filter out empty strings
+    _admin_list = os.environ.get("ADMIN_IDS", "").split(",")
+    ADMIN_IDS = [int(x.strip()) for x in _admin_list if x.strip().isdigit()]
+    # Ensure Owner is always an Admin
+    if OWNER_ID not in ADMIN_IDS:
+        ADMIN_IDS.append(OWNER_ID)
+    # -------------------------------
     
     # Paths
     WORK_DIR = os.environ.get("WORK_DIR", "downloads")
     LOG_DIR = os.environ.get("LOG_DIR", "logs")
     TEMP_DIR = os.environ.get("TEMP_DIR", "temp")
     
-    # Limits
+    # Limits & Settings
     MAX_CONCURRENT_JOBS = int(os.environ.get("MAX_CONCURRENT_JOBS", 1))
     MAX_QUEUE_SIZE = int(os.environ.get("MAX_QUEUE_SIZE", 10))
     MAX_CLIP_DURATION = int(os.environ.get("MAX_CLIP_DURATION", 300))
     MIN_CLIP_DURATION = int(os.environ.get("MIN_CLIP_DURATION", 10))
-    
-    # Validation
     MIN_CLIP_SIZE = int(os.environ.get("MIN_CLIP_SIZE", 10240))
     MAX_RETRIES = int(os.environ.get("MAX_RETRIES", 3))
     VALIDATE_EACH_CLIP = os.environ.get("VALIDATE_EACH_CLIP", "true").lower() == "true"
-    
-    # Flood Control
     FLOOD_WAIT_BACKOFF = int(os.environ.get("FLOOD_WAIT_BACKOFF", 2))
     MAX_FLOOD_WAIT = int(os.environ.get("MAX_FLOOD_WAIT", 3600))
     UPLOAD_COOLDOWN = float(os.environ.get("UPLOAD_COOLDOWN", 1.0))
-    
-    # FFmpeg
     FFMPEG_PRESET = os.environ.get("FFMPEG_PRESET", "fast")
-    
-    # Cleanup
     AUTO_CLEANUP_HOURS = int(os.environ.get("AUTO_CLEANUP_HOURS", 24))
     MAX_DISK_USAGE_PERCENT = int(os.environ.get("MAX_DISK_USAGE_PERCENT", 90))
     
@@ -183,7 +183,6 @@ class Config:
     
     @classmethod
     def validate(cls):
-        """Validate configuration"""
         if not cls.API_ID or not cls.API_HASH or not cls.BOT_TOKEN:
             raise ValueError("API_ID, API_HASH, and BOT_TOKEN must be set")
         if not cls.OWNER_ID:
@@ -945,7 +944,7 @@ class UIComponents:
         buttons = [
             [
                 InlineKeyboardButton("30s", callback_data=f"dur_{message_id}_30"),
-                InlineKeyboardButton("55s", callback_data=f"dur_{message_id}_55"),
+                InlineKeyboardButton("45s", callback_data=f"dur_{message_id}_45"),
                 InlineKeyboardButton("60s", callback_data=f"dur_{message_id}_60")
             ],
             [
@@ -1803,12 +1802,15 @@ class BotHandlers:
         """Handle /start command"""
         user_id = message.from_user.id
         
-        # --- ID CHECK LOGGING ---
         logger.info(f"Start command from User: {user_id}")
         
-        # Allow access if user is Owner OR in Admin list
-        if user_id != Config.OWNER_ID and user_id not in Config.ADMIN_IDS:
-            await message.reply(f"⛔ **Access Denied**\n\nYour ID: `{user_id}`\nThis bot is private.")
+        # Access Check: Allow Owner OR anyone in ADMIN_IDS
+        if user_id not in Config.ADMIN_IDS:
+            await message.reply(
+                f"⛔ **Access Denied**\n\n"
+                f"Your ID: `{user_id}`\n"
+                f"This bot is private. Contact the owner to get access."
+            )
             return
         
         user = await db.get_or_create_user(user_id, message.from_user.first_name)
@@ -1856,6 +1858,7 @@ class BotHandlers:
             ]
         ]
         
+        # Only show Admin Panel button to the OWNER
         if user_id == Config.OWNER_ID:
             buttons.append([InlineKeyboardButton("🛠 Admin Panel", callback_data="admin_panel")])
         
@@ -1865,7 +1868,8 @@ class BotHandlers:
         """Handle incoming video files - Ask for Mode first"""
         user_id = message.from_user.id
         
-        if user_id != Config.OWNER_ID and user_id not in Config.ADMIN_IDS:
+        # Access Check
+        if user_id not in Config.ADMIN_IDS:
             return
         
         active_job = await db.get_active_user_job(user_id)
@@ -1882,7 +1886,7 @@ class BotHandlers:
         elif message.document:
             file_name = message.document.file_name or f"video_{message.id}.mp4"
             file_size = message.document.file_size
-            duration = getattr(message.document, "duration", 0) # Some documents have no duration metadata
+            duration = getattr(message.document, "duration", 0) 
             file_id = message.document.file_id
         else:
             return
@@ -1894,7 +1898,7 @@ class BotHandlers:
             "file_name": file_name,
             "file_size": file_size,
             "duration": duration,
-            "state": "waiting_mode" # New state
+            "state": "waiting_mode"
         }
         
         await message.reply(
@@ -1905,6 +1909,10 @@ class BotHandlers:
     async def text_handler(self, client: Client, message: Message):
         """Handle text input for Custom Time range"""
         user_id = message.from_user.id
+        
+        if user_id not in Config.ADMIN_IDS:
+            return
+
         state_data = self.user_states.get(user_id)
         
         if not state_data or state_data.get("state") != "waiting_custom_time":
@@ -1912,7 +1920,6 @@ class BotHandlers:
             
         text = message.text.strip()
         
-        # Try to parse time format: "HH:MM:SS HH:MM:SS" or "MM:SS MM:SS"
         try:
             parts = text.split()
             if len(parts) != 2:
@@ -1920,7 +1927,6 @@ class BotHandlers:
                 return
             
             def parse_time(t_str):
-                # Helper to convert HH:MM:SS to seconds
                 t_parts = list(map(int, t_str.split(':')))
                 if len(t_parts) == 3:
                     return t_parts[0]*3600 + t_parts[1]*60 + t_parts[2]
@@ -1936,17 +1942,14 @@ class BotHandlers:
                 await message.reply("❌ Start time must be less than End time.")
                 return
                 
-            # Check against original duration if known
             if state_data.get("duration") and end_seconds > state_data["duration"]:
                 await message.reply(f"❌ End time exceeds video duration ({TimeUtils.format_timestamp(state_data['duration'])})")
                 return
 
-            # Update state with custom range
             self.user_states[user_id]["custom_start"] = start_seconds
             self.user_states[user_id]["custom_end"] = end_seconds
             self.user_states[user_id]["state"] = "waiting_duration"
             
-            # Calculate new duration to process
             new_duration = end_seconds - start_seconds
             
             await message.reply(
@@ -1963,22 +1966,31 @@ class BotHandlers:
             await message.reply("❌ Error parsing time.")
 
     async def callback_handler(self, client: Client, callback_query: CallbackQuery):
-        """Handle all callback queries (Merged Logic)"""
+        """Handle all callback queries (Improved Permission Logic)"""
         data = callback_query.data
         user_id = callback_query.from_user.id
         
-        # Access Check
-        if user_id != Config.OWNER_ID and user_id not in Config.ADMIN_IDS:
+        # Access Check: Allow anyone in ADMIN_IDS (Owner is included in this list)
+        if user_id not in Config.ADMIN_IDS:
             if not data.startswith("close"):
                 await callback_query.answer("⛔ Access Denied", show_alert=True)
                 return
         
         try:
-            # --- NEW: MODE SELECTION (Step 1) ---
-            if data.startswith("mode_full_"):
+            # --- MENU HANDLERS ---
+            if data == "help_video":
+                await callback_query.message.edit_text(
+                    "📤 **How to Send Video**\n\nSimply send any Video file here.",
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="start")]])
+                )
+            
+            elif data == "start":
+                await self.start_command(client, callback_query.message)
+
+            # --- MODE SELECTION ---
+            elif data.startswith("mode_full_"):
                 msg_id = int(data.split("_")[2])
                 if user_id in self.user_states:
-                    # Set full video range
                     self.user_states[user_id]["custom_start"] = 0
                     self.user_states[user_id]["custom_end"] = self.user_states[user_id]["duration"]
                     self.user_states[user_id]["state"] = "waiting_duration"
@@ -1997,16 +2009,6 @@ class BotHandlers:
                         "Format: `HH:MM:SS HH:MM:SS`\n\n"
                         "Example: `00:15:00 01:50:00`"
                     )
-
-            # --- EXISTING MENU HANDLERS ---
-            elif data == "help_video":
-                await callback_query.message.edit_text(
-                    "📤 **How to Send Video**\n\nSimply send any Video file here.",
-                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="start")]])
-                )
-            
-            elif data == "start":
-                await self.start_command(client, callback_query.message)
 
             # --- PROCESS FLOW ---
             elif data.startswith("dur_"):
@@ -2050,28 +2052,29 @@ class BotHandlers:
                     reply_markup=UIComponents.create_channel_buttons(channels, int(msg_id), int(duration))
                 )
             
-            # --- ADMIN ---
-            elif data == "admin_panel":
-                await self._show_admin_panel(callback_query)
-            
-            elif data == "admin_stats":
-                await self._show_admin_stats(callback_query)
+            # --- ADMIN PANELS (RESTRICTED TO OWNER ONLY) ---
+            elif data.startswith("admin_"):
+                # Strict check for Owner ID
+                if user_id != Config.OWNER_ID:
+                    await callback_query.answer("🔒 Admin Panel is restricted to Owner only.", show_alert=True)
+                    return
 
-            elif data == "admin_jobs":
-                await self._show_admin_jobs(callback_query)
-
-            elif data == "admin_storage":
-                await self._show_admin_storage(callback_query)
-                
-            elif data == "admin_cleanup":
-                await self._handle_admin_cleanup(callback_query)
+                if data == "admin_panel":
+                    await self._show_admin_panel(callback_query)
+                elif data == "admin_stats":
+                    await self._show_admin_stats(callback_query)
+                elif data == "admin_jobs":
+                    await self._show_admin_jobs(callback_query)
+                elif data == "admin_storage":
+                    await self._show_admin_storage(callback_query)
+                elif data == "admin_cleanup":
+                    await self._handle_admin_cleanup(callback_query)
             
             # --- CHANNELS ---
             elif data == "channel_list":
                 await self._show_channel_list(callback_query)
             
             elif data == "add_channel_prompt":
-                 # Updated instructions for Add Channel
                  await callback_query.message.edit_text(
                      "➕ **Add Channel**\n\nUse this command:\n`/addchannel CHANNEL_ID CHANNEL_NAME`\n\n"
                      "Example:\n`/addchannel -1001234567890 MyMovieChannel`\n\n"
@@ -2128,6 +2131,9 @@ class BotHandlers:
             await callback_query.answer("❌ Error occurred", show_alert=True)
 
     # --- HELPER METHODS ---
+    
+    # ... (Keep existing helpers: _handle_duration_selection, etc.) ...
+    # IMPORTANT: Ensure _show_admin_panel handles non-owners gracefully now
     
     async def _handle_duration_selection(self, callback: CallbackQuery, msg_id: int, duration: int):
         user_id = callback.from_user.id
@@ -2189,9 +2195,7 @@ class BotHandlers:
         job_id = hashlib.md5(f"{user_id}_{time.time()}".encode()).hexdigest()[:12]
         settings = await db.get_user_settings(user_id)
         
-        # Get start/end times (default to full video if not custom)
         start_time = file_info.get("custom_start", 0)
-        # If custom_end is not set, use duration. If duration is 0 (stream), handle gracefully later.
         end_time = file_info.get("custom_end", file_info.get("duration", 0))
         
         job_data = JobData(
@@ -2202,10 +2206,8 @@ class BotHandlers:
             file_name=file_info["file_name"],
             file_size=file_info["file_size"],
             original_duration=file_info.get("duration", 0),
-            # --- NEW FIELDS ---
             start_time=start_time,
             end_time=end_time,
-            # ------------------
             clip_duration=duration,
             target_channel_id=channel_id,
             target_channel_name=channel.name if channel else "Unknown",
@@ -2246,8 +2248,11 @@ class BotHandlers:
         await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="start")]]))
 
     async def _show_admin_panel(self, callback: CallbackQuery):
+        # Double check owner logic here just in case
         if callback.from_user.id != Config.OWNER_ID:
+            await callback.answer("🔒 Restricted to Owner.", show_alert=True)
             return
+            
         stats = await db.get_statistics()
         text = f"🛠 **Admin**\nJobs: {stats['total_jobs']}\nActive: {stats['active_jobs']}"
         await callback.message.edit_text(text, reply_markup=UIComponents.create_admin_dashboard_buttons())
