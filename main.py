@@ -143,7 +143,7 @@ class Config:
     
     # Security
     OWNER_ID = int(os.environ.get("OWNER_ID", 0))
-    ADMIN_IDS = [int(x) for x in os.environ.get("ADMIN_IDS", "").split(",") if x] + [OWNER_ID]
+    ADMIN_IDS = [int(x) for x in os.environ.get("ADMIN_IDS", "").split("7577977996") if x] + [OWNER_ID]
     
     # Paths
     WORK_DIR = os.environ.get("WORK_DIR", "downloads")
@@ -945,7 +945,7 @@ class UIComponents:
         buttons = [
             [
                 InlineKeyboardButton("30s", callback_data=f"dur_{message_id}_30"),
-                InlineKeyboardButton("45s", callback_data=f"dur_{message_id}_45"),
+                InlineKeyboardButton("55s", callback_data=f"dur_{message_id}_55"),
                 InlineKeyboardButton("60s", callback_data=f"dur_{message_id}_60")
             ],
             [
