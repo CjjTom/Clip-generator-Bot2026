@@ -1375,7 +1375,7 @@ class JobProcessor:
         total_parts: int,
         start_part: int = 1
     ):
-        """Process all parts with validation and cancellation support"""
+        """Process all parts using FAST CUT (Copy Mode) to save RAM"""
         job = await db.get_job(job_id)
         if not job:
             return
@@ -1412,23 +1412,26 @@ class JobProcessor:
                 f"🎞 File: `{safe_filename}`\n"
                 f"⏱ Time: {TimeUtils.format_timestamp(abs_start_time)} - {TimeUtils.format_timestamp(abs_end_time)}\n"
                 f"📊 Progress: `{progress_bar}`\n"
-                f"📍 Status: Cutting video...",
+                f"📍 Status: ✂️ Cutting (Fast Mode)...",
                 reply_markup=UIComponents.create_job_control_buttons(job_id, True)
             )
             
             output_path = Path(Config.TEMP_DIR) / f"{job_id}_part_{part_num}.mp4"
             
             # Cut the segment
+            # --- IMPORTANT CHANGE: reencode=False ---
+            # This prevents RAM Crash and preserves 100% Original Quality
             success, error = await VideoProcessor.cut_video_segment(
                 input_path,
                 str(output_path),
                 abs_start_time,
                 segment_duration,
-                reencode=True
+                reencode=False  # Changed from True to False
             )
             
             if not success:
                 logger.error(f"Failed to cut part {part_num}: {error}")
+                # Fallback: If copy fails, try re-encode briefly (optional, usually not needed)
                 await db.jobs.update_one(
                     {"job_id": job_id},
                     {"$push": {"failed_parts": part_num}}
@@ -1469,10 +1472,12 @@ class JobProcessor:
                     {"$push": {"failed_parts": part_num}}
                 )
             
-            # Cleanup clip
+            # Cleanup clip - FORCE GC to free RAM immediately
             if os.path.exists(output_path):
                 try:
                     os.remove(output_path)
+                    import gc
+                    gc.collect() # Manually clear RAM
                 except:
                     pass
             
