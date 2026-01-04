@@ -944,7 +944,7 @@ class UIComponents:
         buttons = [
             [
                 InlineKeyboardButton("30s", callback_data=f"dur_{message_id}_30"),
-                InlineKeyboardButton("45s", callback_data=f"dur_{message_id}_45"),
+                InlineKeyboardButton("55s", callback_data=f"dur_{message_id}_55"),
                 InlineKeyboardButton("60s", callback_data=f"dur_{message_id}_60")
             ],
             [
