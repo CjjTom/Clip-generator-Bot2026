@@ -2215,6 +2215,14 @@ class BotHandlers:
             await self._handle_custom_part_offset_input(message, user_id, state_data)
             return
 
+        # --- Custom duration input (NEW FIX) ---
+        if state_data and state_data.get("state") == "waiting_custom_duration":
+            allowed, denial = await PermissionManager.check_access(user_id, "user")
+            if not allowed:
+                return
+            await self._handle_custom_duration_input(message, user_id, state_data)
+            return
+
         # --- Admin: waiting for user_id to add as admin ---
         if state_data and state_data.get("state") == "waiting_add_admin":
             allowed, denial = await PermissionManager.check_access(user_id, "owner")
@@ -2305,6 +2313,7 @@ class BotHandlers:
 
     async def _handle_custom_part_offset_input(self, message: Message,
                                                 user_id: int, state_data: Dict):
+        """Fix: Redirect directly to preview after getting part offset."""
         text = message.text.strip()
         try:
             offset = int(text)
@@ -2313,50 +2322,70 @@ class BotHandlers:
                 return
 
             self.user_states[user_id]["part_offset"] = offset
-            self.user_states[user_id]["state"]       = "waiting_channel"
+            self.user_states[user_id]["state"]       = "preview"
 
-            # Proceed to channel selection
-            msg_id   = state_data["file_message_id"]
-            duration = state_data.get("clip_duration", 60)
-            channels = await db.get_user_channels(user_id)
+            msg_id     = state_data["file_message_id"]
+            duration   = state_data.get("clip_duration", 60)
+            channel_id = state_data.get("selected_channel_id", 0)
 
-            if not channels:
-                await message.reply(
-                    f"✅ **Part Start Set: {offset}**\n\n"
-                    "❌ No channels found. Use `/addchannel` first."
-                )
-                return
+            # Fetch channel name for the preview
+            channels     = await db.get_user_channels(user_id)
+            channel      = next((c for c in channels if c.channel_id == channel_id), None)
+            channel_name = channel.name if channel else "Unknown"
 
+            file_dur     = state_data.get("duration", 0)
+            custom_start = state_data.get("custom_start", 0)
+            custom_end   = state_data.get("custom_end", file_dur)
+            process_dur  = custom_end - custom_start
+            total_parts  = math.ceil(process_dur / duration) if process_dur > 0 else "?"
+
+            if isinstance(total_parts, int):
+                last_part = offset + total_parts - 1
+                parts_str = f"{offset} → {last_part}"
+            else:
+                parts_str = f"{offset} → ?"
+
+            preview = (
+                f"✅ **Part Start Set: {offset}**\n\n"
+                f"📋 **Preview**\n\n"
+                f"📁 File: `{state_data.get('file_name', '?')}`\n"
+                f"⏱ Clip: {duration}s\n"
+                f"🔢 Parts: {total_parts}\n"
+                f"🏷 Part numbers: **{parts_str}**\n"
+                f"📢 Target: {channel_name}"
+            )
+            
             await message.reply(
-                f"✅ **Parts will start from: {offset}**\n\n"
-                f"**Select target channel:**",
-                reply_markup=UIComponents.create_channel_buttons(channels, msg_id, duration)
+                preview,
+                reply_markup=UIComponents.create_preview_buttons(msg_id, duration, channel_id)
             )
         except ValueError:
             await message.reply("❌ Please enter a valid number. Example: `36`")
 
-    async def _handle_add_admin_input(self, message: Message, user_id: int):
+    async def _handle_custom_duration_input(self, message: Message, user_id: int, state_data: Dict):
+        """Fix: Handle custom duration input logic properly."""
         text = message.text.strip()
         try:
-            target_id = int(text)
-            if target_id == Config.OWNER_ID:
-                await message.reply("ℹ️ That user is already the Owner.")
-                del self.user_states[user_id]
+            duration = int(text)
+            if duration < 10:
+                await message.reply("❌ Duration must be at least 10 seconds.")
                 return
-            success = await db.add_role(
-                target_id, UserRole.ADMIN.value, user_id,
-                notes=f"Added by owner via bot"
+            
+            self.user_states[user_id]["clip_duration"] = duration
+            self.user_states[user_id]["state"] = "waiting_channel"
+            
+            msg_id = state_data["file_message_id"]
+            channels = await db.get_user_channels(user_id)
+            if not channels:
+                await message.reply("❌ No channels found. Use `/addchannel` first.")
+                return
+                
+            await message.reply(
+                f"⏱ **Duration:** {duration}s\n\n**Select target channel:**",
+                reply_markup=UIComponents.create_channel_buttons(channels, msg_id, duration)
             )
-            if success:
-                await message.reply(
-                    f"✅ **Admin Added**\n\n"
-                    f"User `{target_id}` now has Admin access.\n"
-                    f"They can log in and use all operational features."
-                )
-            else:
-                await message.reply("❌ Failed to add admin. Check logs.")
         except ValueError:
-            await message.reply("❌ Invalid user ID. Must be a number.")
+            await message.reply("❌ Please enter a valid number in seconds. Example: `45`")
         finally:
             if user_id in self.user_states:
                 del self.user_states[user_id]
@@ -2481,6 +2510,17 @@ class BotHandlers:
                 await self._handle_duration_selection(
                     callback_query, int(msg_id), int(duration)
                 )
+
+            # NEW FIX: Handle Custom Duration button
+            elif data.startswith("custom_dur_"):
+                msg_id = int(data.split("_")[2])
+                if user_id in self.user_states:
+                    self.user_states[user_id]["state"] = "waiting_custom_duration"
+                    await callback_query.message.edit_text(
+                        "✏️ **Custom Clip Duration**\n\n"
+                        "Send me the duration in seconds for each clip.\n"
+                        "Example: `45` for 45 seconds."
+                    )
 
             # --- CHANNEL SELECTION ---
             elif data.startswith("chan_"):
