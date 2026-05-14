@@ -1,4 +1,3 @@
-cat > /mnt/user-data/outputs/bot_v2.py << 'PYTHON_EOF'
 import os
 import sys
 import time
