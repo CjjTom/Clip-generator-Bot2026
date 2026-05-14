@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from contextlib import asynccontextmanager
 from pyrogram.handlers import MessageHandler, CallbackQueryHandler
 
-# Third-party libraries
+# Third-party librarie
 from pyrogram import Client, filters, enums, errors
 from pyrogram.types import (
     InlineKeyboardMarkup,
